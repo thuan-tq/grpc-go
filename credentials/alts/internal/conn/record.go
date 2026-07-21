@@ -26,7 +26,7 @@ import (
 	"log"
 	"math"
 	"net"
-	"sync"
+	"sync/atomic"
 
 	core "google.golang.org/grpc/credentials/alts/internal"
 	imem "google.golang.org/grpc/internal/mem"
@@ -135,8 +135,8 @@ type conn struct {
 	overhead  int
 	constPool constBufferPool // stored as a field to avoid heap allocations.
 
-	debugReadOnce  sync.Once
-	debugWriteOnce sync.Once
+	debugMaxCiphertext atomic.Int64
+	debugMaxWriteInput atomic.Int64
 }
 
 // NewConn creates a new secure channel instance given the other party role and
@@ -283,10 +283,12 @@ func (p *conn) ReadOnReady(bufSize int, pool mem.BufferPool) (*[]byte, int, erro
 		}
 		ciphertext := msg[msgTypeFieldSize:]
 
-		p.debugReadOnce.Do(func() {
-			log.Printf("[ALTS-DEBUG] ReadOnReady (first frame): bufSize=%d ciphertext=%d fast-decrypt=%v payloadLengthLimit=%d altsReadBufferInitialSize=%d",
-				bufSize, len(ciphertext), bufSize >= len(ciphertext), p.payloadLengthLimit, altsReadBufferInitialSize)
-		})
+		if cur := int64(len(ciphertext)); cur > p.debugMaxCiphertext.Load() {
+			if p.debugMaxCiphertext.Swap(cur) < cur {
+				log.Printf("[ALTS-DEBUG] ReadOnReady (new max frame): bufSize=%d ciphertext=%d fast-decrypt=%v payloadLengthLimit=%d altsReadBufferInitialSize=%d",
+					bufSize, len(ciphertext), bufSize >= len(ciphertext), p.payloadLengthLimit, altsReadBufferInitialSize)
+			}
+		}
 
 		// Decrypt directly into the buffer, avoiding a copy from p.buf if
 		// possible.
@@ -345,10 +347,12 @@ func (p *conn) Write(b []byte) (n int, err error) {
 		numOfFramesInMaxWriteBuf := altsWriteBufferMaxSize / (p.payloadLengthLimit + p.overhead)
 		partialBSize = numOfFramesInMaxWriteBuf * p.payloadLengthLimit
 	}
-	p.debugWriteOnce.Do(func() {
-		log.Printf("[ALTS-DEBUG] Write (first call): inputSize=%d numFrames=%d payloadLengthLimit=%d overhead=%d altsWriteBufferMaxSize=%d",
-			len(b), numOfFrames, p.payloadLengthLimit, p.overhead, altsWriteBufferMaxSize)
-	})
+	if cur := int64(len(b)); cur > p.debugMaxWriteInput.Load() {
+		if p.debugMaxWriteInput.Swap(cur) < cur {
+			log.Printf("[ALTS-DEBUG] Write (new max input): inputSize=%d numFrames=%d payloadLengthLimit=%d overhead=%d altsWriteBufferMaxSize=%d",
+				len(b), numOfFrames, p.payloadLengthLimit, p.overhead, altsWriteBufferMaxSize)
+		}
+	}
 	// Get a writeBuf of the required length.
 	bufHandle := writeBufPool.Get(size)
 	defer writeBufPool.Put(bufHandle)
