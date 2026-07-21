@@ -74,6 +74,9 @@ const (
 	// It includes an additional 512 Bytes to hold two 16KiB records plus
 	// small framing overheads.
 	altsReadBufferInitialSize = 32*1024 + 512 // 32.5KiB
+	// debugLogThreshold suppresses debug logs for small control/handshake
+	// frames so only data-sized frames appear in output.
+	debugLogThreshold = 1024
 )
 
 var (
@@ -285,10 +288,12 @@ func (p *conn) ReadOnReady(bufSize int, pool mem.BufferPool) (*[]byte, int, erro
 		}
 		ciphertext := msg[msgTypeFieldSize:]
 
-		if cur := int64(len(ciphertext)); cur > p.debugMaxCiphertext.Load() {
-			if p.debugMaxCiphertext.Swap(cur) < cur {
-				log.Printf("[ALTS-DEBUG] ReadOnReady (new max frame): bufSize=%d ciphertext=%d fast-decrypt=%v payloadLengthLimit=%d altsReadBufferInitialSize=%d",
-					bufSize, len(ciphertext), bufSize >= len(ciphertext), p.payloadLengthLimit, altsReadBufferInitialSize)
+		if len(ciphertext) > debugLogThreshold {
+			if cur := int64(len(ciphertext)); cur > p.debugMaxCiphertext.Load() {
+				if p.debugMaxCiphertext.Swap(cur) < cur {
+					log.Printf("[ALTS-DEBUG] ReadOnReady (new max frame): bufSize=%d ciphertext=%d fast-decrypt=%v payloadLengthLimit=%d altsReadBufferInitialSize=%d",
+						bufSize, len(ciphertext), bufSize >= len(ciphertext), p.payloadLengthLimit, altsReadBufferInitialSize)
+				}
 			}
 		}
 
@@ -349,10 +354,12 @@ func (p *conn) Write(b []byte) (n int, err error) {
 		numOfFramesInMaxWriteBuf := altsWriteBufferMaxSize / (p.payloadLengthLimit + p.overhead)
 		partialBSize = numOfFramesInMaxWriteBuf * p.payloadLengthLimit
 	}
-	if cur := int64(len(b)); cur > p.debugMaxWriteInput.Load() {
-		if p.debugMaxWriteInput.Swap(cur) < cur {
-			log.Printf("[ALTS-DEBUG] Write (new max input): inputSize=%d numFrames=%d payloadLengthLimit=%d overhead=%d altsWriteBufferMaxSize=%d",
-				len(b), numOfFrames, p.payloadLengthLimit, p.overhead, altsWriteBufferMaxSize)
+	if len(b) > debugLogThreshold {
+		if cur := int64(len(b)); cur > p.debugMaxWriteInput.Load() {
+			if p.debugMaxWriteInput.Swap(cur) < cur {
+				log.Printf("[ALTS-DEBUG] Write (new max input): inputSize=%d numFrames=%d payloadLengthLimit=%d overhead=%d altsWriteBufferMaxSize=%d",
+					len(b), numOfFrames, p.payloadLengthLimit, p.overhead, altsWriteBufferMaxSize)
+			}
 		}
 	}
 	// Get a writeBuf of the required length.
