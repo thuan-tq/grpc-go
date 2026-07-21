@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"time"
 
@@ -289,6 +290,7 @@ func (h *altsHandshaker) doHandshake(req *altspb.HandshakerReq) (net.Conn, *alts
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown resulted record protocol %v", result.RecordProtocol)
 	}
+	log.Printf("[ALTS-DEBUG] doHandshake: peerMaxFrameSize=%d (no local negotiation on this branch; using altsRecordDefaultLength=4096)", result.GetMaxFrameSize())
 	sc, err := conn.NewConn(h.conn, h.side, result.GetRecordProtocol(), result.KeyData[:keyLen], extra)
 	if err != nil {
 		return nil, nil, err
