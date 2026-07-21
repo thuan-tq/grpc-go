@@ -23,8 +23,10 @@ package conn
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"net"
+	"sync"
 
 	core "google.golang.org/grpc/credentials/alts/internal"
 	imem "google.golang.org/grpc/internal/mem"
@@ -133,6 +135,9 @@ type conn struct {
 	// overhead is the calculated overhead of each frame.
 	overhead  int
 	constPool constBufferPool // stored as a field to avoid heap allocations.
+
+	debugReadOnce  sync.Once
+	debugWriteOnce sync.Once
 }
 
 // NewConn creates a new secure channel instance given the other party role and
@@ -176,6 +181,8 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 		nextFrame:          protectedBuf,
 		overhead:           overhead,
 	}
+	log.Printf("[ALTS-DEBUG] NewConn: protocol=%s side=%v negotiatedFrameSize=%d maxRecordLen=%d overhead=%d payloadLengthLimit=%d altsWriteBufferMaxSize=%d altsReadBufferInitialSize=%d",
+		recordProtocol, side, negotiatedFrameSize, maxRecordLen, overhead, payloadLengthLimit, altsWriteBufferMaxSize, altsReadBufferInitialSize)
 	return altsConn, nil
 }
 
@@ -278,6 +285,11 @@ func (p *conn) ReadOnReady(bufSize int, pool mem.BufferPool) (*[]byte, int, erro
 		}
 		ciphertext := msg[msgTypeFieldSize:]
 
+		p.debugReadOnce.Do(func() {
+			log.Printf("[ALTS-DEBUG] ReadOnReady (first frame): bufSize=%d ciphertext=%d fast-decrypt=%v payloadLengthLimit=%d altsReadBufferInitialSize=%d",
+				bufSize, len(ciphertext), bufSize >= len(ciphertext), p.payloadLengthLimit, altsReadBufferInitialSize)
+		})
+
 		// Decrypt directly into the buffer, avoiding a copy from p.buf if
 		// possible.
 		if bufSize >= len(ciphertext) {
@@ -335,6 +347,10 @@ func (p *conn) Write(b []byte) (n int, err error) {
 		numOfFramesInMaxWriteBuf := altsWriteBufferMaxSize / (p.payloadLengthLimit + p.overhead)
 		partialBSize = numOfFramesInMaxWriteBuf * p.payloadLengthLimit
 	}
+	p.debugWriteOnce.Do(func() {
+		log.Printf("[ALTS-DEBUG] Write (first call): inputSize=%d numFrames=%d payloadLengthLimit=%d overhead=%d altsWriteBufferMaxSize=%d",
+			len(b), numOfFrames, p.payloadLengthLimit, p.overhead, altsWriteBufferMaxSize)
+	})
 	// Get a writeBuf of the required length.
 	bufHandle := writeBufPool.Get(size)
 	defer writeBufPool.Put(bufHandle)
