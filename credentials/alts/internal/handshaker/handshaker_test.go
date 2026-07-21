@@ -372,3 +372,21 @@ func (s) TestNewServerHandshaker(t *testing.T) {
 	}
 	hs.Close()
 }
+
+func (s) TestComputeNegotiatedFrameSize(t *testing.T) {
+	for _, tc := range []struct {
+		peerFrameSize     int
+		localMaxFrameSize int
+		want              int
+	}{
+		{0, 512, 0},
+		{1024, 512, 512},
+		{256, 512, 256},
+	} {
+		got := computeNegotiatedFrameSize(tc.peerFrameSize, tc.localMaxFrameSize)
+		if got != tc.want {
+			t.Errorf("computeNegotiatedFrameSize(%v, %v) = %v, want %v",
+				tc.peerFrameSize, tc.localMaxFrameSize, got, tc.want)
+		}
+	}
+}

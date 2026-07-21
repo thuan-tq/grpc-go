@@ -90,7 +90,7 @@ func newTestALTSRecordConn(in, out *bytes.Buffer, side core.Side, rp string, pro
 		in:  in,
 		out: out,
 	}
-	c, err := NewConn(&tc, side, rp, key, protected)
+	c, err := NewConn(&tc, side, rp, key, protected, 0)
 	if err != nil {
 		panic(fmt.Sprintf("Unexpected error creating test ALTS record connection: %v", err))
 	}
@@ -381,7 +381,7 @@ func BenchmarkWriteMemoryUsage(b *testing.B) {
 	conn := &noopConn{}
 
 	for b.Loop() {
-		c, err := NewConn(conn, core.ClientSide, rekeyRecordProtocol, key, nil)
+		c, err := NewConn(conn, core.ClientSide, rekeyRecordProtocol, key, nil, 0)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -433,7 +433,7 @@ func (s) TestParseFramedMsgVulnerability(t *testing.T) {
 	// bytes happen to start with `0x06` (altsRecordMsgType), the vulnerable
 	// code will try to slice `msg[4:]` which panics because len(msg) is 0.
 	malformedProtected := []byte{0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00}
-	c, err := NewConn(&tc, core.ServerSide, rekeyRecordProtocol, key, malformedProtected)
+	c, err := NewConn(&tc, core.ServerSide, rekeyRecordProtocol, key, malformedProtected, 0)
 	if err != nil {
 		t.Fatalf("NewConn failed: %v", err)
 	}
@@ -441,5 +441,82 @@ func (s) TestParseFramedMsgVulnerability(t *testing.T) {
 	const wantErr = "shorter than message type field size"
 	if _, err := c.Read(buf); err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("c.Read(buf) returned error: %v, want error containing %q", err, wantErr)
+	}
+}
+
+// countALTSFrames parses raw ALTS wire bytes and returns the number of complete frames.
+func countALTSFrames(data []byte) int {
+	count := 0
+	for len(data) >= MsgLenFieldSize {
+		frameLen := int(binary.LittleEndian.Uint32(data[:MsgLenFieldSize]))
+		total := MsgLenFieldSize + frameLen
+		if total > len(data) {
+			break
+		}
+		data = data[total:]
+		count++
+	}
+	return count
+}
+
+// TestWriteFrameCount verifies that the number of encrypted frames written to
+// the wire matches the negotiated frame size. With 32 KB frames, each payload
+// fits in a single frame instead of being split into eight 4 KB frames.
+func (s) TestWriteFrameCount(t *testing.T) {
+	key := make([]byte, 16)
+	for _, tt := range []struct {
+		name                string
+		negotiatedFrameSize int
+		payloadMultiplier   int
+		wantFrames          int
+	}{
+		{"32KB frames, 1 frame", 32 * 1024, 1, 1},
+		{"32KB frames, 2 frames", 32 * 1024, 2, 2},
+		{"default 4KB frames, 1 frame", 0, 1, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := new(bytes.Buffer)
+			c, err := NewConn(&testConn{in: new(bytes.Buffer), out: out}, core.ClientSide, rekeyRecordProtocol, key, nil, tt.negotiatedFrameSize)
+			if err != nil {
+				t.Fatalf("NewConn failed: %v", err)
+			}
+			altsC := c.(*conn)
+			payload := make([]byte, tt.payloadMultiplier*altsC.payloadLengthLimit)
+			if _, err := c.Write(payload); err != nil {
+				t.Fatalf("Write failed: %v", err)
+			}
+			if got := countALTSFrames(out.Bytes()); got != tt.wantFrames {
+				t.Errorf("Write produced %d frames, want %d", got, tt.wantFrames)
+			}
+		})
+	}
+}
+
+func (s) TestNewConnNegotiatedFrameSize(t *testing.T) {
+	key := make([]byte, 32)
+	for _, tc := range []struct {
+		name                string
+		negotiatedFrameSize int
+		wantMaxRecordLen    int
+	}{
+		{"zero", 0, altsRecordDefaultLength},
+		{"too small", altsRecordDefaultLength - 1, altsRecordDefaultLength},
+		{"exact default", altsRecordDefaultLength, altsRecordDefaultLength},
+		{"middle", altsRecordDefaultLength + 1024, altsRecordDefaultLength + 1024},
+		{"too large", altsWriteBufferMaxSize + 1, altsWriteBufferMaxSize},
+		{"exact max", altsWriteBufferMaxSize, altsWriteBufferMaxSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tcConn := testConn{}
+			c, err := NewConn(&tcConn, core.ClientSide, rekeyRecordProtocol, key, nil, tc.negotiatedFrameSize)
+			if err != nil {
+				t.Fatalf("NewConn failed: %v", err)
+			}
+			altsC := c.(*conn)
+			expectedPayloadLimit := tc.wantMaxRecordLen - altsC.overhead
+			if altsC.payloadLengthLimit != expectedPayloadLimit {
+				t.Errorf("payloadLengthLimit = %v, want %v", altsC.payloadLengthLimit, expectedPayloadLimit)
+			}
+		})
 	}
 }
