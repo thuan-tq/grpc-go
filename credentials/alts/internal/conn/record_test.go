@@ -90,7 +90,7 @@ func newTestALTSRecordConn(in, out *bytes.Buffer, side core.Side, rp string, pro
 		in:  in,
 		out: out,
 	}
-	c, err := NewConn(&tc, side, rp, key, protected)
+	c, err := NewConn(&tc, side, rp, key, protected, 0)
 	if err != nil {
 		panic(fmt.Sprintf("Unexpected error creating test ALTS record connection: %v", err))
 	}
@@ -381,7 +381,7 @@ func BenchmarkWriteMemoryUsage(b *testing.B) {
 	conn := &noopConn{}
 
 	for b.Loop() {
-		c, err := NewConn(conn, core.ClientSide, rekeyRecordProtocol, key, nil)
+		c, err := NewConn(conn, core.ClientSide, rekeyRecordProtocol, key, nil, 0)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -433,7 +433,7 @@ func (s) TestParseFramedMsgVulnerability(t *testing.T) {
 	// bytes happen to start with `0x06` (altsRecordMsgType), the vulnerable
 	// code will try to slice `msg[4:]` which panics because len(msg) is 0.
 	malformedProtected := []byte{0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00}
-	c, err := NewConn(&tc, core.ServerSide, rekeyRecordProtocol, key, malformedProtected)
+	c, err := NewConn(&tc, core.ServerSide, rekeyRecordProtocol, key, malformedProtected, 0)
 	if err != nil {
 		t.Fatalf("NewConn failed: %v", err)
 	}
@@ -441,5 +441,72 @@ func (s) TestParseFramedMsgVulnerability(t *testing.T) {
 	const wantErr = "shorter than message type field size"
 	if _, err := c.Read(buf); err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("c.Read(buf) returned error: %v, want error containing %q", err, wantErr)
+	}
+}
+
+// countALTSFrames parses raw ALTS wire bytes and returns the number of complete frames.
+func countALTSFrames(data []byte) int {
+	count := 0
+	for len(data) >= MsgLenFieldSize {
+		frameLen := int(binary.LittleEndian.Uint32(data[:MsgLenFieldSize]))
+		total := MsgLenFieldSize + frameLen
+		if total > len(data) {
+			break
+		}
+		data = data[total:]
+		count++
+	}
+	return count
+}
+
+func (s) TestNewConnPeerMaxFrameSize(t *testing.T) {
+	key := make([]byte, 32)
+	for _, tc := range []struct {
+		name             string
+		peerMaxFrameSize int
+		wantMaxRecordLen int
+	}{
+		{"not advertised", 0, altsRecordDefaultLength},
+		{"larger than our default", altsRecordDefaultLength + 1024, altsRecordDefaultLength},
+		{"equal to our default", altsRecordDefaultLength, altsRecordDefaultLength},
+		{"smaller than our default", 16 * 1024, 16 * 1024},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tcConn := testConn{}
+			c, err := NewConn(&tcConn, core.ClientSide, rekeyRecordProtocol, key, nil, tc.peerMaxFrameSize)
+			if err != nil {
+				t.Fatalf("NewConn failed: %v", err)
+			}
+			altsC := c.(*conn)
+			wantPayloadLimit := tc.wantMaxRecordLen - altsC.overhead
+			if altsC.payloadLengthLimit != wantPayloadLimit {
+				t.Errorf("payloadLengthLimit = %v, want %v", altsC.payloadLengthLimit, wantPayloadLimit)
+			}
+		})
+	}
+}
+
+// TestWriteHonorsPeerMaxFrameSize verifies that Write clamps its frame size to a
+// peer-advertised max_frame_size smaller than altsRecordDefaultLength, so we never
+// send a frame the peer said it can't accept.
+func (s) TestWriteHonorsPeerMaxFrameSize(t *testing.T) {
+	key := make([]byte, 16)
+	const peerMaxFrameSize = 16 * 1024
+	out := new(bytes.Buffer)
+	c, err := NewConn(&testConn{in: new(bytes.Buffer), out: out}, core.ClientSide, rekeyRecordProtocol, key, nil, peerMaxFrameSize)
+	if err != nil {
+		t.Fatalf("NewConn failed: %v", err)
+	}
+	altsC := c.(*conn)
+	if got, want := altsC.payloadLengthLimit+altsC.overhead, peerMaxFrameSize; got != want {
+		t.Fatalf("frame size = %v, want %v", got, want)
+	}
+	// Two peerMaxFrameSize-worth of plaintext should split into exactly two frames.
+	payload := make([]byte, 2*altsC.payloadLengthLimit)
+	if _, err := c.Write(payload); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if got, want := countALTSFrames(out.Bytes()), 2; got != want {
+		t.Errorf("Write produced %d frames, want %d", got, want)
 	}
 }
